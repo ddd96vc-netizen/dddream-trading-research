@@ -1,0 +1,36 @@
+# Entorno y secretos -- NUNCA subir esto
+.env
+_env
+
+# Base de datos -- demasiado grande y específica de cada usuario
+*.db
+dddream.db
+
+# Fotos subidas por X (contenido de usuario, no código)
+app/static/x_uploads/
+static/x_uploads/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Sandbox -- circunstancial, no se sube salvo que se promueva
+sandbox/*
+!sandbox/README.md
+
+# CSVs de resultados de optimizador (se regeneran corriendo el script)
+optimizador_*.csv
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

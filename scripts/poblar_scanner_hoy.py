@@ -30,8 +30,10 @@ probado contra Finviz real (todos los resultados con cambio negativo).
 BUSQUEDA DE BAJADAS DESACTIVADA — 2026-10-21
 La llamada a buscar_bajadas() está comentada abajo (la función se deja
 intacta). El universo sigue siendo SOLO subidas, Small ($300mln to $2bln):
-el validado para A2 y FRD, y el que ya tiene su forward en paper_señales
-(A2 33 señales, FRD 38, sobre tickers que entraron como subidas).
+el validado para A2 y FRD. OJO: el universo real del forward es este
+scanner MAS buscar_tickers_por_perfil.py (que el monitor también lanza y
+escribe en la misma scanner_results, con micro/nano/mid caps y bajadas):
+las 33 señales A2 y 29 de las 38 FRD salieron de tickers de ese buscador.
 Motivo: el monitor lanza esto a las 14:50 hora de España = 8:50 ET, antes
 de la apertura, así que el 'Change' de Finviz es probablemente el de la
 sesión ANTERIOR: 'Down 5%' traería las que cayeron ayer, no los gap downs

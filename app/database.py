@@ -11,7 +11,12 @@ load_dotenv()
 API_KEY = os.getenv('FINNHUB_API_KEY')
 
 class Database:
-    def __init__(self, ruta ='database/dddream.db'):
+    def __init__(self, ruta=None):
+        # Ruta absoluta a partir de este archivo: antes era 'database/dddream.db'
+        # relativa a la carpeta actual, y corriendo desde otra carpeta fallaba
+        # o sqlite creaba una base vacía nueva.
+        if ruta is None:
+            ruta = str(Path(__file__).resolve().parent.parent / 'database' / 'dddream.db')
         self.ruta = ruta
         print(f'Base de Datos en {self.ruta}')
    
@@ -200,30 +205,38 @@ class Database:
         print("tabla correctamente creada campeon y tambien daily_data y de gaps creados")
 
     def obtener_small_caps_finviz(self, cambio_min=5, volumen_min=500000, precio_min=1, precio_max=20,
-                                    float_max_millones=None, inst_max_pct=None):
-        from finvizfinance.screener.overview import Overview
+                                    float_max_millones=None, inst_max_pct=None,
+                                    market_cap='Small ($300mln to $2bln)'):
+        # market_cap: 'Small' es el universo con el que se validaron las 4
+        # estrategias del monitor -- NO cambiarlo aquí o el forward deja de
+        # medir lo validado. Deja fuera micro y nano caps (<$300M): ej.
+        # 21/10/2026, Small=35 tickers vs bajo $2B=93. Ampliar a
+        # '-Small (under $2bln)' es una hipótesis nueva: backtestear aparte.
+        from finviz_screener import screener
         from datetime import date
 
         print(f"Buscando small caps en Finviz...")
 
-        foverview = Overview()
-        
-
-        # Mapeo de cambio % a las opciones que acepta Finviz
+        # Mapeo de cambio % a las opciones que acepta Finviz. Antes todo lo
+        # menor a 5% se mandaba como 'Up 5%' (el Grupo 3 con cambio_min=2
+        # filtraba en realidad con 5%). Finviz sí acepta Up 1%..Up 10%.
         def mapear_cambio(pct):
-            if pct >= 20: return 'Up 20%'
-            if pct >= 15: return 'Up 15%'
-            if pct >= 10: return 'Up 10%'
-            if pct >= 5:  return 'Up 5%'
-            return 'Up 5%'
+            for umbral in (20, 15, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1):
+                if pct >= umbral:
+                    return f'Up {umbral}%'
+            return 'Up'
 
         # Mapeo de volumen a las opciones que acepta Finviz
         def mapear_volumen(vol):
-            if vol >= 2_000_000: return 'Over 2M'
-            if vol >= 1_000_000: return 'Over 1M'
-            if vol >= 500_000:   return 'Over 500K'
-            if vol >= 200_000:   return 'Over 200K'
-            return 'Over 200K'
+            for umbral, texto in ((20_000_000, 'Over 20M'), (10_000_000, 'Over 10M'),
+                                  (5_000_000, 'Over 5M'), (2_000_000, 'Over 2M'),
+                                  (1_000_000, 'Over 1M'), (750_000, 'Over 750K'),
+                                  (500_000, 'Over 500K'), (400_000, 'Over 400K'),
+                                  (300_000, 'Over 300K'), (200_000, 'Over 200K'),
+                                  (100_000, 'Over 100K')):
+                if vol >= umbral:
+                    return texto
+            return 'Over 50K'
 
         # Mapeo de precio a las opciones que acepta Finviz
         def mapear_precio(pmin, pmax):
@@ -241,12 +254,12 @@ class Database:
             'Price':          mapear_precio(precio_min, precio_max),
             'Change':         mapear_cambio(cambio_min),
             'Current Volume': mapear_volumen(volumen_min),
-            'Market Cap.':    'Small ($300mln to $2bln)'
+            'Market Cap.':    market_cap,
         }
-        foverview.set_filter(filters_dict=filtros)
+        print(f"  Filtros: {filtros}")
 
         try:
-            df = foverview.screener_view()
+            df = screener('overview', filters_dict=filtros)
 
             if df is None or df.empty:
                 print("✗ No se encontraron resultados")
@@ -254,17 +267,13 @@ class Database:
 
             print(f"✓ {len(df)} small caps encontradas, obteniendo detalles...")
 
-            tickers_encontrados = [row['Ticker'] for _, row in df.iterrows()]
+            # El ticker sale de data-ticker: ya no hace falta el parche de la
+            # "letra inicial duplicada" (era la letra del logo de Finviz).
+            tickers_encontrados = list(df['Ticker'])
 
-            # Traer float/short/rvol/atr/rsi/gap para TODOS de golpe. Se prueban
-            # varios rangos de market cap (no solo 'Small') porque un ticker con
-            # un movimiento fuerte en el día puede saltar de categoría entre el
-            # scan inicial y esta consulta. Si Finviz no lo encuentra en ninguno,
-            # yfinance actúa de respaldo.
-            detalles = self.enriquecer_completo(
-                tickers_encontrados,
-                filtros_market_cap=['Small ($300mln to $2bln)', 'Micro ($50mln to $300mln)', 'Mid ($2bln to $10bln)']
-            )
+            # Traer float/short/rvol/atr/rsi/gap pidiendo a Finviz SOLO estos
+            # tickers. Si Finviz no lo encuentra, yfinance actúa de respaldo.
+            detalles = self.enriquecer_completo(tickers_encontrados)
 
             conn = self.conectar()
             cursor = conn.cursor()
@@ -518,22 +527,14 @@ class Database:
         para una LISTA de símbolos en pasadas por el screener de Finviz
         (vistas Ownership + Technical). El quote individual de Finviz está roto;
         esta vía SÍ funciona.
-        filtros_market_cap: lista de valores de 'Market Cap.' a probar en orden
-        (por defecto Small y Micro, para cubrir más small caps reales — muchas
-        cotizan por debajo de $300M). Símbolos que no aparezcan en NINGUNO de
-        estos rangos simplemente no tendrán datos (limitación conocida).
+        Ahora se piden a Finviz SOLO estos símbolos (parámetro t= del screener),
+        así que cubre cualquier market cap, nano caps incluidas, y es mucho más
+        rápido que bajarse rangos enteros de market cap para buscarlos ahí.
+        filtros_market_cap: ya no se usa; se deja para no romper llamadas viejas.
         Devuelve dict: {symbol: {price, change_pct, volume, float_shares,
                                   short_float_pct, rvol, atr, rsi, gap_pct}}
         """
-        from finvizfinance.screener.ownership import Ownership
-        from finvizfinance.screener.technical import Technical
-
-        if filtros_market_cap is None:
-            filtros_market_cap = [
-                'Small ($300mln to $2bln)',
-                'Micro ($50mln to $300mln)',
-                'Mid ($2bln to $10bln)',
-            ]
+        from finviz_screener import screener
 
         def limpiar(val):
             if val is None or val == '-' or str(val).lower() == 'nan':
@@ -552,68 +553,59 @@ class Database:
 
         resultado = {}
         pendientes = set(s.upper().strip() for s in symbols)
+        if not pendientes:
+            return resultado
 
-        for cap_filtro in filtros_market_cap:
-            if not pendientes:
-                break
+        try:
+            df_own = screener('ownership', tickers=pendientes)
+        except Exception as e:
+            print(f"  (aviso: Ownership falló: {e})")
+            df_own = None
 
-            filtro = {'Market Cap.': cap_filtro}
+        try:
+            df_tec = screener('technical', tickers=pendientes)
+        except Exception as e:
+            print(f"  (aviso: Technical falló: {e})")
+            df_tec = None
 
-            try:
-                o = Ownership()
-                o.set_filter(filters_dict=filtro)
-                df_own = o.screener_view()
-            except Exception as e:
-                print(f"  (aviso: Ownership con filtro '{cap_filtro}' falló: {e})")
-                df_own = None
+        own = {row['Ticker']: row for _, row in df_own.iterrows()} if df_own is not None and not df_own.empty else {}
+        tec = {row['Ticker']: row for _, row in df_tec.iterrows()} if df_tec is not None and not df_tec.empty else {}
 
-            try:
-                t = Technical()
-                t.set_filter(filters_dict=filtro)
-                df_tec = t.screener_view()
-            except Exception as e:
-                print(f"  (aviso: Technical con filtro '{cap_filtro}' falló: {e})")
-                df_tec = None
+        for sym in pendientes:
+            o_row = own.get(sym)
+            if o_row is None:
+                continue
 
-            own = {row['Ticker']: row for _, row in df_own.iterrows()} if df_own is not None else {}
-            tec = {row['Ticker']: row for _, row in df_tec.iterrows()} if df_tec is not None else {}
+            t_row = tec.get(sym)
 
-            encontrados_ahora = set()
-            for sym in list(pendientes):
-                o_row = own.get(sym)
-                if o_row is None:
-                    continue
+            vol = limpiar(o_row.get('Volume'))
+            avg_vol = limpiar(o_row.get('Avg Volume'))
+            rvol = round(vol / avg_vol, 2) if (vol and avg_vol and avg_vol > 0) else None
 
-                t_row = tec.get(sym)
+            # El lector nuevo da los % ya en porcentaje ('10.69%' -> 10.69),
+            # no en fracción como finvizfinance: ya NO se multiplica por 100.
+            cambio = limpiar(o_row.get('Change'))
+            gap = limpiar(t_row.get('Gap')) if t_row is not None else None
+            inst = limpiar(o_row.get('Inst Own'))
 
-                vol = limpiar(o_row.get('Volume'))
-                avg_vol = limpiar(o_row.get('Avg Volume'))
-                rvol = round(vol / avg_vol, 2) if (vol and avg_vol and avg_vol > 0) else None
+            resultado[sym] = {
+                'price': limpiar(o_row.get('Price')),
+                'change_pct': round(cambio, 2) if cambio is not None else None,
+                'volume': int(vol) if vol else None,
+                'float_shares': limpiar(o_row.get('Float')),
+                'short_float_pct': limpiar(o_row.get('Short Float')),
+                'rvol': rvol,
+                'atr': limpiar(t_row.get('ATR')) if t_row is not None else None,
+                'rsi': limpiar(t_row.get('RSI')) if t_row is not None else None,
+                'gap_pct': round(gap, 2) if gap is not None else None,
+                'inst_own': round(inst, 1) if inst is not None else None,
+            }
 
-                cambio_raw = limpiar(o_row.get('Change'))       # viene como fracción (0.05 = 5%)
-                gap_raw = limpiar(t_row.get('Gap')) if t_row is not None else None
-                inst_raw = limpiar(o_row.get('Inst Own'))        # viene como fracción (0.20 = 20%)
-
-                resultado[sym] = {
-                    'price': limpiar(o_row.get('Price')),
-                    'change_pct': round(cambio_raw * 100, 2) if cambio_raw is not None else None,
-                    'volume': int(vol) if vol else None,
-                    'float_shares': limpiar(o_row.get('Float')),
-                    'short_float_pct': limpiar(o_row.get('Short Float')),
-                    'rvol': rvol,
-                    'atr': limpiar(t_row.get('ATR')) if t_row is not None else None,
-                    'rsi': limpiar(t_row.get('RSI')) if t_row is not None else None,
-                    'gap_pct': round(gap_raw * 100, 2) if gap_raw is not None else None,
-                    'inst_own': round(inst_raw * 100, 1) if inst_raw is not None else None,
-                }
-                encontrados_ahora.add(sym)
-
-            pendientes -= encontrados_ahora
-            if encontrados_ahora:
-                print(f"  ✓ {len(encontrados_ahora)} encontrados en '{cap_filtro}'")
-
-        if pendientes:
-            print(f"  ⚠ {len(pendientes)} símbolos no aparecieron en ningún rango de market cap probado: {sorted(pendientes)}")
+        if resultado:
+            print(f"  ✓ {len(resultado)} encontrados en Finviz")
+        faltan = pendientes - set(resultado)
+        if faltan:
+            print(f"  ⚠ {len(faltan)} símbolos no aparecieron en Finviz: {sorted(faltan)}")
 
         return resultado
 
